@@ -1,4 +1,4 @@
-module github.com/KTBsomen/jsjson
+module github.com/ktbsomen/jsjson
 
 go 1.22.5
 
