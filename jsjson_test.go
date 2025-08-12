@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	JSON "github.com/KTBsomen/jsjson"
+	JSON "github.com/ktbsomen/jsjson"
 )
 
 // Example usage demonstrating the improved API
