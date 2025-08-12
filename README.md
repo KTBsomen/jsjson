@@ -45,7 +45,7 @@ name := Parse(jsonStr).Get("users", 0, "name").StringOr("Unknown")
 ## 📦 Installation
 
 ```bash
-go get github.com/KTBsomen/jsjson
+go get github.com/ktbsomen/jsjson
 ```
 
 ## 🚀 Quick Start
