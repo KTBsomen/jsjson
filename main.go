@@ -3,6 +3,7 @@ package jsjson
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strconv"
 	"sync"
 )
@@ -30,6 +31,14 @@ var (
 			return &JSONValue{}
 		},
 	}
+	
+	// Byte slice pool for buffer reuse
+	bytesPool = sync.Pool{
+		New: func() interface{} {
+			b := make([]byte, 0, 1024)
+			return &b
+		},
+	}
 )
 
 // getJSONValue gets a JSONValue from pool
@@ -44,41 +53,87 @@ func putJSONValue(jv *JSONValue) {
 	jsonValuePool.Put(jv)
 }
 
+// getBytesBuffer gets a byte slice from pool
+func getBytesBuffer() *[]byte {
+	return bytesPool.Get().(*[]byte)
+}
+
+// putBytesBuffer returns a byte slice to pool
+func putBytesBuffer(b *[]byte) {
+	*b = (*b)[:0] // reset length but keep capacity
+	bytesPool.Put(b)
+}
+
 // -------------------- Core JSON API --------------------
 
-// Parse creates a JSONValue from various input types
-func Parse(v interface{}) JSONValue {
+// Parse creates a JSONValue from various input types with optional struct destination
+// Usage: Parse(data) or Parse(data, &structDest)
+func Parse(v interface{}, dest ...interface{}) JSONValue {
 	if v == nil {
 		return JSONValue{err: &JSONError{Op: "Parse", Err: fmt.Errorf("input is nil")}}
 	}
 
+	// Check if destination struct is provided
+	var structDest interface{}
+	if len(dest) > 0 {
+		structDest = dest[0]
+		if structDest != nil {
+			// Validate that dest is a pointer
+			destType := reflect.TypeOf(structDest)
+			if destType.Kind() != reflect.Ptr {
+				return JSONValue{err: &JSONError{Op: "Parse", Err: fmt.Errorf("destination must be a pointer, got %T", structDest)}}
+			}
+		}
+	}
+
 	var result interface{}
 	var err error
+	var jsonBytes []byte
 
 	switch val := v.(type) {
 	case string:
 		if val == "" {
 			return JSONValue{err: &JSONError{Op: "Parse", Err: fmt.Errorf("empty string")}}
 		}
-		err = json.Unmarshal([]byte(val), &result)
+		jsonBytes = []byte(val)
 	case []byte:
 		if len(val) == 0 {
 			return JSONValue{err: &JSONError{Op: "Parse", Err: fmt.Errorf("empty byte slice")}}
 		}
-		err = json.Unmarshal(val, &result)
+		jsonBytes = val
 	case JSONValue:
-		// Already a JSONValue, return as-is (avoid double parsing)
+		// Already a JSONValue, handle struct destination if provided
+		if structDest != nil && val.err == nil {
+			if unmarshalErr := val.To(structDest); unmarshalErr != nil {
+				return JSONValue{err: &JSONError{Op: "Parse", Err: unmarshalErr}}
+			}
+		}
 		return val
 	default:
 		// For other types, try to marshal then unmarshal
-		// This handles structs, maps, slices, etc.
-		bytes, marshalErr := json.Marshal(val)
+		var marshalErr error
+		jsonBytes, marshalErr = json.Marshal(val)
 		if marshalErr != nil {
 			return JSONValue{err: &JSONError{Op: "Parse", Err: marshalErr}}
 		}
-		err = json.Unmarshal(bytes, &result)
 	}
 
+	// If struct destination is provided, unmarshal directly into it
+	if structDest != nil {
+		err = json.Unmarshal(jsonBytes, structDest)
+		if err != nil {
+			return JSONValue{err: &JSONError{Op: "Parse", Err: err}}
+		}
+		// Also parse into generic interface{} for JSONValue functionality
+		err = json.Unmarshal(jsonBytes, &result)
+		if err != nil {
+			return JSONValue{err: &JSONError{Op: "Parse", Err: err}}
+		}
+		return JSONValue{data: result}
+	}
+
+	// Standard parsing into interface{}
+	err = json.Unmarshal(jsonBytes, &result)
 	if err != nil {
 		return JSONValue{err: &JSONError{Op: "Parse", Err: err}}
 	}
@@ -86,13 +141,66 @@ func Parse(v interface{}) JSONValue {
 	return JSONValue{data: result}
 }
 
+// ParseInto directly parses JSON data into a struct with better performance
+// This is more efficient than Parse + To for struct unmarshaling
+func ParseInto(data interface{}, dest interface{}) error {
+	if dest == nil {
+		return &JSONError{Op: "ParseInto", Err: fmt.Errorf("destination cannot be nil")}
+	}
+
+	destType := reflect.TypeOf(dest)
+	if destType.Kind() != reflect.Ptr {
+		return &JSONError{Op: "ParseInto", Err: fmt.Errorf("destination must be a pointer, got %T", dest)}
+	}
+
+	var jsonBytes []byte
+	var err error
+
+	switch val := data.(type) {
+	case string:
+		if val == "" {
+			return &JSONError{Op: "ParseInto", Err: fmt.Errorf("empty string")}
+		}
+		jsonBytes = []byte(val)
+	case []byte:
+		if len(val) == 0 {
+			return &JSONError{Op: "ParseInto", Err: fmt.Errorf("empty byte slice")}
+		}
+		jsonBytes = val
+	case JSONValue:
+		if val.err != nil {
+			return &JSONError{Op: "ParseInto", Err: val.err}
+		}
+		return val.To(dest)
+	default:
+		jsonBytes, err = json.Marshal(val)
+		if err != nil {
+			return &JSONError{Op: "ParseInto", Err: err}
+		}
+	}
+
+	err = json.Unmarshal(jsonBytes, dest)
+	if err != nil {
+		return &JSONError{Op: "ParseInto", Err: err}
+	}
+
+	return nil
+}
+
 // MustParse is like Parse but panics on error
-func MustParse(v interface{}) JSONValue {
-	result := Parse(v)
+func MustParse(v interface{}, dest ...interface{}) JSONValue {
+	result := Parse(v, dest...)
 	if result.err != nil {
 		panic(result.err)
 	}
 	return result
+}
+
+// MustParseInto is like ParseInto but panics on error
+func MustParseInto(data interface{}, dest interface{}) {
+	if err := ParseInto(data, dest); err != nil {
+		panic(err)
+	}
 }
 
 // Stringify converts a value to JSON string
@@ -109,11 +217,28 @@ func Stringify(v interface{}) (string, error) {
 		v = jv.data
 	}
 
-	bytes, err := json.Marshal(v)
+	// Use buffer pool for better performance
+	buffer := getBytesBuffer()
+	defer putBytesBuffer(buffer)
+
+	// Reset buffer and grow if needed
+	if cap(*buffer) < 512 {
+		*buffer = make([]byte, 0, 1024)
+	}
+
+	encoder := json.NewEncoder(&bytesWriter{buffer})
+	err := encoder.Encode(v)
 	if err != nil {
 		return "", &JSONError{Op: "Stringify", Err: err}
 	}
-	return string(bytes), nil
+
+	// Remove trailing newline that encoder adds
+	result := *buffer
+	if len(result) > 0 && result[len(result)-1] == '\n' {
+		result = result[:len(result)-1]
+	}
+
+	return string(result), nil
 }
 
 // StringifyPretty converts a value to pretty-printed JSON string
@@ -419,6 +544,68 @@ func (j JSONValue) Type() string {
 	}
 }
 
+// -------------------- Enhanced To Method --------------------
+
+// To unmarshals the JSONValue data into the provided destination with improved performance
+func (j JSONValue) To(dest interface{}) error {
+	if j.err != nil {
+		return &JSONError{Op: "To", Err: j.err}
+	}
+
+	if dest == nil {
+		return &JSONError{Op: "To", Err: fmt.Errorf("destination cannot be nil")}
+	}
+
+	// Direct assignment for simple cases to avoid marshal/unmarshal overhead
+	destValue := reflect.ValueOf(dest)
+	if destValue.Kind() != reflect.Ptr {
+		return &JSONError{Op: "To", Err: fmt.Errorf("destination must be a pointer, got %T", dest)}
+	}
+
+	destElem := destValue.Elem()
+	
+	// Try direct assignment for compatible types
+	if j.data != nil && destElem.CanSet() {
+		srcValue := reflect.ValueOf(j.data)
+		if srcValue.Type().AssignableTo(destElem.Type()) {
+			destElem.Set(srcValue)
+			return nil
+		}
+	}
+
+	// Fall back to JSON marshal/unmarshal for complex types
+	buffer := getBytesBuffer()
+	defer putBytesBuffer(buffer)
+
+	// Reset buffer
+	*buffer = (*buffer)[:0]
+
+	// Use a bytes writer for better performance
+	encoder := json.NewEncoder(&bytesWriter{buffer})
+	if err := encoder.Encode(j.data); err != nil {
+		return &JSONError{Op: "To", Err: fmt.Errorf("failed to marshal data: %w", err)}
+	}
+
+	// Remove trailing newline
+	if len(*buffer) > 0 && (*buffer)[len(*buffer)-1] == '\n' {
+		*buffer = (*buffer)[:len(*buffer)-1]
+	}
+
+	// Unmarshal into the destination
+	if err := json.Unmarshal(*buffer, dest); err != nil {
+		return &JSONError{Op: "To", Err: fmt.Errorf("failed to unmarshal into destination: %w", err)}
+	}
+
+	return nil
+}
+
+// MustTo is like To but panics on error
+func (j JSONValue) MustTo(dest interface{}) {
+	if err := j.To(dest); err != nil {
+		panic(err)
+	}
+}
+
 // -------------------- Utility Functions --------------------
 
 // convertToIndex converts various types to array index
@@ -433,6 +620,16 @@ func convertToIndex(key interface{}) (int, error) {
 	default:
 		return 0, fmt.Errorf("cannot convert %T to array index", key)
 	}
+}
+
+// bytesWriter implements io.Writer for efficient byte slice writing
+type bytesWriter struct {
+	buf *[]byte
+}
+
+func (w *bytesWriter) Write(p []byte) (n int, err error) {
+	*w.buf = append(*w.buf, p...)
+	return len(p), nil
 }
 
 // -------------------- Convenience Functions --------------------
@@ -453,11 +650,20 @@ func (j JSONValue) Clone() JSONValue {
 		return j
 	}
 
-	// Deep copy by marshaling and unmarshaling
-	bytes, err := json.Marshal(j.data)
-	if err != nil {
+	// Use buffer pool for better performance
+	buffer := getBytesBuffer()
+	defer putBytesBuffer(buffer)
+
+	*buffer = (*buffer)[:0]
+	encoder := json.NewEncoder(&bytesWriter{buffer})
+	if err := encoder.Encode(j.data); err != nil {
 		return JSONValue{err: &JSONError{Op: "Clone", Err: err}}
 	}
 
-	return Parse(bytes)
+	// Remove trailing newline
+	if len(*buffer) > 0 && (*buffer)[len(*buffer)-1] == '\n' {
+		*buffer = (*buffer)[:len(*buffer)-1]
+	}
+
+	return Parse(*buffer)
 }

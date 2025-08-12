@@ -32,7 +32,10 @@ name := Parse(jsonStr).Get("users", 0, "name").StringOr("Unknown")
 ```
 
 ## 🎯 Features
-
+- **📦 Direct Struct Support** - Parse JSON directly into Go structs with Parse(data, &struct)
+- **⚡ High-Performance ParseInto** - Fastest struct parsing with ParseInto(data, &struct)
+- **🎭 Dual Mode Operations** - Get both struct safety AND JSONValue flexibility
+- **🔄 Backward Compatible** - All existing code works unchanged
 - **🔗 Chainable API** - JavaScript-like method chaining
 - **🛡️ Built-in Error Handling** - No more manual type assertions
 - **⚡ High Performance** - Competitive with popular Go JSON libraries
@@ -55,9 +58,17 @@ package main
 
 import (
     "fmt"
-    "github.com/KTBsomen/jsjson"
+    "github.com/ktbsomen/jsjson"
 )
-
+type User struct {
+    Name    string   `json:"name"`
+    Age     int      `json:"age"`
+    Hobbies []string `json:"hobbies"`
+    Address struct {
+        City    string `json:"city"`
+        Zipcode string `json:"zipcode"`
+    } `json:"address"`
+}
 func main() {
     jsonStr := `{
         "user": {
@@ -70,8 +81,21 @@ func main() {
             }
         }
     }`
+    // Method 1: Parse with struct destination
+    var user User
+    jv := jsjson.Parse(jsonStr, &user)
+    if jv.IsValid() {
+        fmt.Printf("User: %+v\n", user)
+        // Still access via JSONValue for dynamic operations
+        city := jv.Get("address", "city").StringOr("Unknown")
+    }
 
-    // Parse JSON
+    // Method 2: High-performance direct parsing
+    var user2 User
+    if err := jsjson.ParseInto(jsonStr, &user2); err == nil {
+        fmt.Printf("User2: %+v\n", user2)
+    }
+    // Method 3: Parse dynamic JSON
     obj := jsonjs.Parse(jsonStr)
     
     // Access nested values with defaults
@@ -89,24 +113,38 @@ func main() {
 ## 📚 Complete API Reference
 
 ### Core Functions
+### ParseInto (NEW in v2.0)
+```go
+gofunc ParseInto(data interface{}, dest interface{}) error
+```
+High-performance direct parsing into structs. More efficient than Parse + To for struct unmarshaling.
+```go
+type User struct {
+    Name string `json:"name"`
+    Age  int    `json:"age"`
+}
+
+var user User
+err := ParseInto(`{"name": "John", "age": 30}`, &user)
+// user is now populated, no JSONValue overhead
+```
 
 #### Parse
 ```go
-func Parse(v interface{}) JSONValue
+func Parse(v interface{}, dest ...interface{}) JSONValue
 ```
 Parses JSON from string, []byte, or any Go value. Returns JSONValue with error handling.
 
 ```go
-// From JSON string
-obj := Parse(`{"name": "John", "age": 30}`)
-
-// From byte slice
-data := []byte(`{"active": true}`)
-obj := Parse(data)
-
-// From Go struct/map
-user := map[string]interface{}{"id": 123}
-obj := Parse(user)
+var user User
+jv := Parse(jsonStr, &user) // Populates user AND returns JSONValue
+if jv.IsValid() {
+    // Use populated struct
+    fmt.Printf("Name: %s\n", user.Name)
+    
+    // Also use JSONValue for dynamic access
+    email := jv.Get("profile", "email").StringOr("N/A")
+}
 ```
 
 #### MustParse
@@ -292,7 +330,68 @@ func processUserAPI(jsonResponse string) {
     fmt.Printf("Page %d of %d\n", currentPage, totalPages)
 }
 ```
+### Struct-Based Data Processing
+```go
+type APIUser struct {
+    ID       int      `json:"id"`
+    Name     string   `json:"name"`
+    Email    string   `json:"email"`
+    Active   bool     `json:"active"`
+    Tags     []string `json:"tags"`
+    Profile  struct {
+        Bio      string `json:"bio"`
+        Location string `json:"location"`
+    } `json:"profile"`
+    Metadata map[string]interface{} `json:"metadata"`
+}
 
+func processUsersWithStructs(jsonResponse string) {
+    // Parse into struct while keeping JSONValue access
+    var response struct {
+        Users []APIUser `json:"users"`
+        Meta  struct {
+            Page  int `json:"page"`
+            Total int `json:"total"`
+        } `json:"meta"`
+    }
+    
+    jv := jsjson.Parse(jsonResponse, &response)
+    if !jv.IsValid() {
+        log.Printf("Failed to parse response: %v", jv.Error())
+        return
+    }
+    
+    // Use struct for type-safe access
+    fmt.Printf("Processing %d users (page %d)\n", 
+               len(response.Users), response.Meta.Page)
+    
+    for _, user := range response.Users {
+        fmt.Printf("User: %s <%s> - Active: %t\n", 
+                   user.Name, user.Email, user.Active)
+        
+        // Use JSONValue for dynamic metadata access
+        userJV := jv.Get("users", 0) // Get first user as JSONValue
+        lastLogin := userJV.Get("metadata", "last_login").StringOr("Never")
+        fmt.Printf("Last login: %s\n", lastLogin)
+    }
+}
+
+// High-performance batch processing
+func processBatchUsers(jsonBatch []string) []APIUser {
+    users := make([]APIUser, 0, len(jsonBatch))
+    
+    for _, jsonStr := range jsonBatch {
+        var user APIUser
+        if err := jsjson.ParseInto(jsonStr, &user); err == nil {
+            users = append(users, user)
+        } else {
+            log.Printf("Skipping invalid user JSON: %v", err)
+        }
+    }
+    
+    return users
+}
+```
 ### Configuration File Parsing
 ```go
 func loadConfig(configJSON string) AppConfig {

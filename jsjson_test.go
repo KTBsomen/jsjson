@@ -299,3 +299,172 @@ func ExamplePerformanceComparison() {
 	elapsed := time.Since(start)
 	fmt.Printf("Processing time: %v\n", elapsed)
 }
+
+// Test the To method for unmarshaling into structs
+func TestJSONValue_To(t *testing.T) {
+	type User struct {
+		Name   string   `json:"name"`
+		Age    int      `json:"age"`
+		Active bool     `json:"active"`
+		Tags   []string `json:"tags"`
+	}
+	
+	type Profile struct {
+		Email string `json:"email"`
+		Bio   string `json:"bio"`
+	}
+	
+	jsonStr := `{
+		"name": "John Doe",
+		"age": 30,
+		"active": true,
+		"tags": ["developer", "golang"],
+		"profile": {
+			"email": "john@example.com",
+			"bio": "Go developer"
+		}
+	}`
+	
+	obj := JSON.Parse(jsonStr)
+	
+	t.Run("unmarshal to struct", func(t *testing.T) {
+		var user User
+		err := obj.To(&user)
+		if err != nil {
+			t.Errorf("Expected no error, got: %v", err)
+		}
+		if user.Name != "John Doe" {
+			t.Errorf("Expected name 'John Doe', got: %s", user.Name)
+		}
+		if user.Age != 30 {
+			t.Errorf("Expected age 30, got: %d", user.Age)
+		}
+		if !user.Active {
+			t.Errorf("Expected active to be true")
+		}
+		if len(user.Tags) != 2 || user.Tags[0] != "developer" || user.Tags[1] != "golang" {
+			t.Errorf("Expected tags [developer golang], got: %v", user.Tags)
+		}
+	})
+	
+	t.Run("unmarshal nested object", func(t *testing.T) {
+		var profile Profile
+		err := obj.Get("profile").To(&profile)
+		if err != nil {
+			t.Errorf("Expected no error, got: %v", err)
+		}
+		if profile.Email != "john@example.com" {
+			t.Errorf("Expected email 'john@example.com', got: %s", profile.Email)
+		}
+		if profile.Bio != "Go developer" {
+			t.Errorf("Expected bio 'Go developer', got: %s", profile.Bio)
+		}
+	})
+	
+	t.Run("unmarshal to map", func(t *testing.T) {
+		var data map[string]interface{}
+		err := obj.To(&data)
+		if err != nil {
+			t.Errorf("Expected no error, got: %v", err)
+		}
+		if data["name"] != "John Doe" {
+			t.Errorf("Expected name 'John Doe', got: %v", data["name"])
+		}
+		if data["age"] != float64(30) { // JSON numbers are float64
+			t.Errorf("Expected age 30.0, got: %v", data["age"])
+		}
+	})
+	
+	t.Run("error cases", func(t *testing.T) {
+		// Nil destination
+		err := obj.To(nil)
+		if err == nil {
+			t.Error("Expected error for nil destination")
+		}
+		
+		// Invalid JSON
+		invalidObj := JSON.Parse(`invalid json`)
+		var user User
+		err = invalidObj.To(&user)
+		if err == nil {
+			t.Error("Expected error for invalid JSON")
+		}
+		
+		// Non-pointer destination (this will fail during unmarshal)
+		var userCopy User
+		err = obj.To(userCopy) // Should be &userCopy
+		if err == nil {
+			t.Error("Expected error for non-pointer destination")
+		}
+	})
+}
+
+func TestJSONValue_MustTo(t *testing.T) {
+	type User struct {
+		Name string `json:"name"`
+		Age  int    `json:"age"`
+	}
+	
+	obj := JSON.Parse(`{"name": "John", "age": 30}`)
+	
+	t.Run("successful unmarshal", func(t *testing.T) {
+		var user User
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("MustTo should not panic for valid data, but panicked with: %v", r)
+			}
+		}()
+		
+		obj.MustTo(&user)
+		if user.Name != "John" {
+			t.Errorf("Expected name 'John', got: %s", user.Name)
+		}
+		if user.Age != 30 {
+			t.Errorf("Expected age 30, got: %d", user.Age)
+		}
+	})
+	
+	t.Run("panic on error", func(t *testing.T) {
+		invalidObj := JSON.Parse(`invalid json`)
+		var user User
+		
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("MustTo should panic for invalid JSON")
+			}
+		}()
+		
+		invalidObj.MustTo(&user)
+	})
+}
+
+// Example showing practical usage of the To method
+func ExampleJSONValue_To() {
+	type JobPayload struct {
+		ID       int    `json:"id"`
+		Task     string `json:"task"`
+		Priority int    `json:"priority"`
+	}
+	
+	// Simulate job data from a queue
+	jobData := `{
+		"id": 12345,
+		"task": "process_upload",
+		"priority": 1,
+		"metadata": {
+			"created_at": "2023-01-01T00:00:00Z",
+			"retry_count": 0
+		}
+	}`
+	
+	// Parse and unmarshal into struct
+	var payload JobPayload
+	err := JSON.Parse(jobData).To(&payload)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	
+	fmt.Printf("Job ID: %d, Task: %s, Priority: %d\n", payload.ID, payload.Task, payload.Priority)
+	// Output: Job ID: 12345, Task: process_upload, Priority: 1
+}
